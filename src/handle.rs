@@ -1,43 +1,51 @@
-use crate::to_message::ToMessage;
+use crate::process::mm_register;
+use crate::proto::{unspec_err, ToClientWrap, TryToMessage};
 use crate::tungstenite::Error;
-use crate::GameFabric;
+use crate::{proto, GameFabric};
 use fpc_proto::from_client::FromClient;
 use fpc_proto::from_client::MatchmakingQueue::Register;
-use fpc_proto::to_client::UnspecifiedError;
+use fpc_proto::reg_ok;
+use fpc_proto::to_client::MatchmakingQueue;
+use fpc_proto::to_client::ToClient;
 use futures::stream::{BoxStream, SelectAll};
-use futures::{SinkExt, Stream, StreamExt};
+use futures::{SinkExt, StreamExt};
 use log::{debug, error};
 use matchmaker::inqueue::InqueueSender;
 use matchmaker::{Event, Matchmaker};
 use std::net::SocketAddr;
-use std::pin::Pin;
 use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tokio_tungstenite::tungstenite;
 use tokio_tungstenite::tungstenite::Message;
 
-enum State {
+pub(crate) enum State {
     Idle,
     Inqueue(InqueueSender),
     Ingame,
 }
 
+impl Default for State {
+    fn default() -> Self {
+        State::Idle
+    }
+}
+
 impl State {
-    fn is_idle(&self) -> bool {
+    pub(crate) fn is_idle(&self) -> bool {
         match self {
             Self::Idle => true,
             _ => false,
         }
     }
 
-    fn to_inqueue(&mut self, iq: InqueueSender) {
+    pub(crate) fn to_inqueue(&mut self, iq: InqueueSender) {
         *self = State::Inqueue(iq);
     }
 }
 
 #[derive(Debug)]
-enum StreamConcat {
+pub(crate) enum StreamConcat {
     Net(Result<tungstenite::Message, tungstenite::Error>),
     Matchmaker(Event),
     Game,
@@ -45,6 +53,12 @@ enum StreamConcat {
 
 fn net_process(net: Result<Message, Error>) {
     //let unwrap = match net
+}
+
+#[derive(Default)]
+pub(crate) struct Storage {
+    pub(crate) name: Option<String>,
+    pub(crate) state: State,
 }
 
 pub(crate) async fn handle(
@@ -62,9 +76,7 @@ pub(crate) async fn handle(
 
     select.push(net_rx_map.boxed());
 
-    let mut state = State::Idle;
-
-    let mut p_name = None;
+    let mut storage = Storage::default();
 
     //let mut raw_err = RawErr(addr, &mut net_tx);
 
@@ -80,17 +92,25 @@ pub(crate) async fn handle(
                 Ok(Message::Text(raw)) => {
                     match serde_json::from_str::<FromClient>(&raw) {
                         Ok(proto_msg) => match proto_msg {
-                            FromClient::MatchmakingQueue(Register { name }) => if matches!(state, State::Idle) {
-                                p_name = Some(name);
+                            FromClient::MatchmakingQueue(Register { name }) => {
+                                let to_client_wrap: ToClientWrap = mm_register(
+                                    &mut storage,
+                                    matchmaker.clone(),
+                                    &mut select,
+                                    name,
+                                )
+                                .await
+                                .into();
+                                if let Ok(m) = to_client_wrap.to_client.try_to_msg() {
+                                    net_tx.send(m).await;
+                                }
                             }
-
                         },
                         Err(e) => {
                             //raw_err.execute("qwe","qwe");
                             let desc = "Error while parsing msg";
                             error!("{:?}, {}, msg: {:?}", addr, desc, e);
-                            if let Ok(m) = (UnspecifiedError { desc: desc.into() }).try_to_message()
-                            {
+                            if let Ok(m) = unspec_err(desc).try_to_msg() {
                                 net_tx.send(m).await;
                             }
                         }
@@ -108,7 +128,7 @@ pub(crate) async fn handle(
                 _ => {
                     let desc = "Error while recv()";
                     error!("{:?}, {}, msg: {:?}", addr, desc, net);
-                    if let Ok(m) = (UnspecifiedError { desc: desc.into() }).try_to_message() {
+                    if let Ok(m) = unspec_err(desc).try_to_msg() {
                         net_tx.send(m).await;
                     }
                 }

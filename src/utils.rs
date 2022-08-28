@@ -1,14 +1,3 @@
-use crate::to_message::ToMessage;
-use fpc_proto::to_client::UnspecifiedError;
-use futures::stream::SplitSink;
-use futures::SinkExt;
-use log::error;
-use std::fmt::Debug;
-use std::net::SocketAddr;
-use tokio::net::TcpStream;
-use tokio_tungstenite::tungstenite::Message;
-use tokio_tungstenite::WebSocketStream;
-
 /*pub(crate) struct RawErr<'a>(
     pub(crate) SocketAddr,
     pub(crate) &'a mut SplitSink<WebSocketStream<TcpStream>, Message>,
@@ -22,3 +11,5 @@ impl<'a> RawErr<'a> {
         }
     }
 }*/
+
+//pub trait try_send

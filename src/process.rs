@@ -1,6 +1,6 @@
 use crate::handle::{State, Storage, StreamConcat};
 use crate::proto::ToClientWrap;
-use fpc_proto::{reg_err_already, reg_err_bad_name, reg_err_unspec, reg_ok};
+use fpc_proto::{mm_reg_err_already, mm_reg_err_unspec, mm_reg_ok};
 use futures::stream::{BoxStream, SelectAll};
 use futures::StreamExt;
 use matchmaker::Matchmaker;
@@ -37,12 +37,12 @@ pub(crate) async fn mm_register(
 impl From<Result<(), MmRegisterErr>> for ToClientWrap {
     fn from(r: Result<(), MmRegisterErr>) -> Self {
         let to_client = match r {
-            Ok(()) => reg_ok!(),
+            Ok(()) => mm_reg_ok!(),
             Err(MmRegisterErr::StateNotIdle) => {
-                reg_err_already!("already in mm queue or in game")
+                mm_reg_err_already!("already in mm queue or in game")
             }
             Err(MmRegisterErr::MmJoin(matchmaker::JoinErr::DuplicateUniqueId)) => {
-                reg_err_unspec!("queue full")
+                mm_reg_err_unspec!("queue full")
             }
         };
         ToClientWrap { to_client }

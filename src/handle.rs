@@ -1,12 +1,13 @@
 use crate::process::mm_register;
-use crate::proto::{unspec_err, ToClientWrap, TryToMessage};
+use crate::proto::{ToClientWrap, TryToMessage};
 use crate::tungstenite::Error;
+use crate::utils::SendIfMsg;
 use crate::{proto, GameFabric};
 use fpc_proto::from_client::FromClient;
-use fpc_proto::from_client::MatchmakingQueue::Register;
-use fpc_proto::reg_ok;
+use fpc_proto::from_client::MatchmakingQueue::{HeartbeatCheck, Leave, Register};
 use fpc_proto::to_client::MatchmakingQueue;
 use fpc_proto::to_client::ToClient;
+use fpc_proto::{mm_continue, mm_hb_check, mm_player_kick, mm_reg_ok, unspec_err};
 use futures::stream::{BoxStream, SelectAll};
 use futures::{SinkExt, StreamExt};
 use log::{debug, error};
@@ -42,6 +43,10 @@ impl State {
     pub(crate) fn to_inqueue(&mut self, iq: InqueueSender) {
         *self = State::Inqueue(iq);
     }
+
+    pub(crate) fn to_idle(&mut self) {
+        *self = State::Idle;
+    }
 }
 
 #[derive(Debug)]
@@ -68,17 +73,13 @@ pub(crate) async fn handle(
     game_fabric: Arc<Mutex<GameFabric>>,
 ) {
     let ws_stream = tokio_tungstenite::accept_async(tcp_stream).await.unwrap();
-    let (mut net_tx, mut net_rx) = ws_stream.split();
+    let (mut net_tx, net_rx) = ws_stream.split();
 
-    let mut net_rx_map = net_rx.map(|i| StreamConcat::Net(i));
-
+    let net_rx_map = net_rx.map(|i| StreamConcat::Net(i));
     let mut select: SelectAll<BoxStream<StreamConcat>> = SelectAll::new();
-
     select.push(net_rx_map.boxed());
 
     let mut storage = Storage::default();
-
-    //let mut raw_err = RawErr(addr, &mut net_tx);
 
     while let Some(pdu) = select.next().await {
         debug!(
@@ -93,6 +94,8 @@ pub(crate) async fn handle(
                     match serde_json::from_str::<FromClient>(&raw) {
                         Ok(proto_msg) => match proto_msg {
                             FromClient::MatchmakingQueue(Register { name }) => {
+                                // TODO: log error if mm queque full
+                                // TODO: validate name
                                 let to_client_wrap: ToClientWrap = mm_register(
                                     &mut storage,
                                     matchmaker.clone(),
@@ -101,39 +104,46 @@ pub(crate) async fn handle(
                                 )
                                 .await
                                 .into();
-                                if let Ok(m) = to_client_wrap.to_client.try_to_msg() {
-                                    net_tx.send(m).await;
+                                net_tx.send_if_enc(to_client_wrap.to_client).await;
+                            }
+                            FromClient::MatchmakingQueue(Leave {}) => {
+                                if let State::Inqueue(ref inq) = storage.state {
+                                    inq.leave();
+                                }
+                            }
+                            FromClient::MatchmakingQueue(HeartbeatCheck {}) => {
+                                if let State::Inqueue(ref inq) = storage.state {
+                                    inq.confirm();
                                 }
                             }
                         },
                         Err(e) => {
-                            //raw_err.execute("qwe","qwe");
                             let desc = "Error while parsing msg";
                             error!("{:?}, {}, msg: {:?}", addr, desc, e);
-                            if let Ok(m) = unspec_err(desc).try_to_msg() {
-                                net_tx.send(m).await;
-                            }
+                            net_tx.send_if_enc(unspec_err!(desc)).await;
                         }
                     }
-                    /*if m == "queue".to_string() && state.is_idle() {
-                        if let Ok(inqueue) = matchmaker.lock().await.join().await {
-                            let (inqueue_tx, inqueue_rx) = inqueue.split();
-                            let inqueue_rx_map = inqueue_rx.map(|i| StreamConcat::Matchmaker(i));
-                            select.push(inqueue_rx_map.boxed());
-                            state.to_inqueue(inqueue_tx);
-                        }
-                    }*/
                 }
                 Err(Error::ConnectionClosed) | Ok(Message::Close(_)) => (),
                 _ => {
                     let desc = "Error while recv()";
                     error!("{:?}, {}, msg: {:?}", addr, desc, net);
-                    if let Ok(m) = unspec_err(desc).try_to_msg() {
-                        net_tx.send(m).await;
-                    }
+                    net_tx.send_if_enc(unspec_err!(desc)).await;
                 }
             },
-            StreamConcat::Matchmaker(_) => (),
+            StreamConcat::Matchmaker(ev) => match ev {
+                Event::Kicked { reason } => {
+                    storage.state.to_idle();
+                    net_tx
+                        .send_if_enc(mm_player_kick!(format! {"{:?}", reason}))
+                        .await;
+                }
+                Event::ConfirmRequired { timeout } => {
+                    net_tx.send_if_enc(mm_hb_check!(timeout.as_secs())).await;
+                }
+                Event::WaitForQuorum => net_tx.send_if_enc(mm_continue!()).await,
+                Event::Ready => todo!(),
+            },
             StreamConcat::Game => (),
         }
     }

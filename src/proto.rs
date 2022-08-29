@@ -20,21 +20,6 @@ impl TryToMessage for ToClient {
     }
 }
 
-pub(crate) fn unspec_err(desc: &str) -> UnspecifiedError {
-    UnspecifiedError { desc: desc.into() }
-}
-
-/*pub(crate) fn reg_ok() -> ToClient {
-    ToClient::MatchmakingQueue(MatchmakingQueue::Register(Register::Ok {}))
-}*/
-
-/*#[macro_export]
-macro_rules! reg_ok {
-    () => {
-        crate::to_client::ToClient::MatchmakingQueue(crate::to_client::MatchmakingQueue::Register(crate::to_client::Register::Ok {}))
-    }
-}*/
-
 pub(crate) struct ToClientWrap {
     pub(crate) to_client: ToClient,
 }
